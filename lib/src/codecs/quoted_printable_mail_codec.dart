@@ -65,52 +65,108 @@ class QuotedPrintableMailCodec extends MailCodec {
   /// [codec] the optional codec, which defaults to utf8.
   /// Set the optional [fromStart] to true in case the encoding should  start
   /// at the beginning of the text and not in the middle.
-
-
   @override
   String encodeHeader(final String text,
       {int nameLength = 0, Codec codec = utf8, bool fromStart = false}) {
-    final runes = text.runes.toList(growable: false);
-    if (runes.every((rune) => rune <= 127)) {
-      return text; // No encoding needed for ASCII only strings
-    }
+    final runes = List.from(text.runes, growable: false);
+    var numberOfRunesAbove7Bit = 0;
+    var startIndex = -1;
+    var endIndex = -1;
+    final runeCount = runes.length;
 
-    const qpWordHead = '=?utf8?Q?';
-    const qpWordTail = '?=';
-    const qpWordDelimiterSize = qpWordHead.length + qpWordTail.length;
-
-    StringBuffer buffer = StringBuffer();
-    StringBuffer encodedWord = StringBuffer();
-
-    void flushEncodedWord() {
-      if (encodedWord.isNotEmpty) {
-        buffer.write(qpWordHead + encodedWord.toString() + qpWordTail + ' ');
-        encodedWord.clear();
+    for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
+      final rune = runes[runeIndex];
+      if (rune > 128) {
+        numberOfRunesAbove7Bit++;
+        if (startIndex == -1) {
+          startIndex = runeIndex;
+          endIndex = runeIndex;
+        } else {
+          endIndex = runeIndex;
+        }
       }
     }
-
-    int wordLength = 0;
-    for (var rune in runes) {
-      String encodedChar;
-      if (rune <= 127) {
-        encodedChar = String.fromCharCode(rune);
-      } else {
-        encodedChar = _encodeQuotedPrintableChar(rune, codec);
+    if (numberOfRunesAbove7Bit == 0) {
+      return text;
+    } else {
+      // TODO Set the correct encoding
+      const qpWordHead = '=?utf8?Q?';
+      const qpWordTail = '?=';
+      const qpWordDelimiterSize = qpWordHead.length + qpWordTail.length;
+      if (fromStart) {
+        startIndex = 0;
+        endIndex = text.length - 1;
       }
-
-      wordLength += encodedChar.length;
-      if (wordLength > MailConventions.encodedWordMaxLength - qpWordDelimiterSize || rune == 32) {
-        flushEncodedWord();
-        wordLength = encodedChar.length;
+      // Available space for the current encoded word
+      var qpWordSize = MailConventions.encodedWordMaxLength -
+          qpWordDelimiterSize -
+          startIndex -
+          (nameLength + 2);
+      // Counts the characters of the current encoded word
+      var wordCounter = 0;
+      // True when reached the end of the current word available space
+      var isWordSplit = false;
+      final buffer = StringBuffer();
+      for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
+        final rune = runes[runeIndex];
+        if (runeIndex < startIndex || runeIndex > endIndex) {
+          buffer.writeCharCode(rune);
+          continue;
+        }
+        if (runeIndex == startIndex || isWordSplit) {
+          // Adds the line terminator
+          if (isWordSplit) {
+            buffer
+              ..write(qpWordTail)
+              // NOTE Per specification, a CRLF should be inserted here,
+              // but the folding occurs on the rendering function.
+              // Here we leave only the WSP marker to separate each q-encode
+              // word.
+              // ..writeCharCode(AsciiRunes.runeCarriageReturn)
+              // ..writeCharCode(AsciiRunes.runeLineFeed)
+              // Assumes per default a single leading space for header folding
+              ..writeCharCode(AsciiRunes.runeSpace);
+            // Resets the split flag
+            isWordSplit = false;
+            // Calculates the new encoded word size
+            qpWordSize =
+                MailConventions.encodedWordMaxLength - qpWordDelimiterSize - 1;
+          }
+          buffer.write(qpWordHead);
+        }
+        if ((rune > AsciiRunes.runeSpace && rune <= 60) ||
+            (rune == 62) ||
+            (rune > 63 && rune <= 126 && rune != AsciiRunes.runeUnderline)) {
+          wordCounter++;
+          isWordSplit = wordCounter > qpWordSize;
+          if (!isWordSplit) {
+            buffer.writeCharCode(rune);
+          }
+        } else if (rune == AsciiRunes.runeSpace) {
+          wordCounter++;
+          isWordSplit = wordCounter > qpWordSize;
+          if (!isWordSplit) {
+            buffer.write('_');
+          }
+        } else {
+          // _writeQuotedPrintable(rune, buffer, codec);
+          final quoted = _encodeQuotedPrintableChar(rune, codec);
+          wordCounter += quoted.length;
+          isWordSplit = wordCounter > qpWordSize;
+          if (!isWordSplit) {
+            buffer.write(quoted);
+          }
+        }
+        if (isWordSplit) {
+          wordCounter = 0;
+          runeIndex--;
+        }
+        if (runeIndex == endIndex) {
+          buffer.write(qpWordTail);
+        }
       }
-
-      if (rune != 32) { // Do not add spaces to encoded word
-        encodedWord.write(encodedChar);
-      }
+      return buffer.toString();
     }
-
-    flushEncodedWord();
-    return buffer.toString().trim(); // Remove trailing space
   }
 
   /// Decodes the specified text
