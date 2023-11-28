@@ -66,108 +66,181 @@ class QuotedPrintableMailCodec extends MailCodec {
   /// Set the optional [fromStart] to true in case the encoding should  start
   /// at the beginning of the text and not in the middle.
   @override
-  String encodeHeader(final String text,
-      {int nameLength = 0, Codec codec = utf8, bool fromStart = false}) {
+  String encodeHeader(final String text, {int nameLength = 0, Codec codec = utf8,
+    bool fromStart = false}) {
     final runes = List.from(text.runes, growable: false);
-    var numberOfRunesAbove7Bit = 0;
-    var startIndex = -1;
-    var endIndex = -1;
+    var startIndex = 0;
+    var endIndex = runes.length - 1;
     final runeCount = runes.length;
+
+    // Check if there are any characters above ASCII 128
+    final hasNonAscii = runes.any((rune) => rune > 128);
+    if (!hasNonAscii) {
+      return text;
+    }
+
+    const qpWordHead = '=?utf8?Q?';
+    const qpWordTail = '?=';
+    const qpWordDelimiterSize = qpWordHead.length + qpWordTail.length;
+
+    if (fromStart) {
+      startIndex = 0;
+      endIndex = text.length - 1;
+    }
+
+    var qpWordSize = MailConventions.encodedWordMaxLength - qpWordDelimiterSize - (nameLength + 2);
+    var wordCounter = 0;
+    var isWordSplit = false;
+    final buffer = StringBuffer();
 
     for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
       final rune = runes[runeIndex];
-      if (rune > 128) {
-        numberOfRunesAbove7Bit++;
-        if (startIndex == -1) {
-          startIndex = runeIndex;
-          endIndex = runeIndex;
-        } else {
-          endIndex = runeIndex;
-        }
+      if (runeIndex < startIndex || runeIndex > endIndex) {
+        buffer.writeCharCode(rune);
+        continue;
       }
-    }
-    if (numberOfRunesAbove7Bit == 0) {
-      return text;
-    } else {
-      // TODO Set the correct encoding
-      const qpWordHead = '=?utf8?Q?';
-      const qpWordTail = '?=';
-      const qpWordDelimiterSize = qpWordHead.length + qpWordTail.length;
-      if (fromStart) {
-        startIndex = 0;
-        endIndex = text.length - 1;
-      }
-      // Available space for the current encoded word
-      var qpWordSize = MailConventions.encodedWordMaxLength -
-          qpWordDelimiterSize -
-          startIndex -
-          (nameLength + 2);
-      // Counts the characters of the current encoded word
-      var wordCounter = 0;
-      // True when reached the end of the current word available space
-      var isWordSplit = false;
-      final buffer = StringBuffer();
-      for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
-        final rune = runes[runeIndex];
-        if (runeIndex < startIndex || runeIndex > endIndex) {
-          buffer.writeCharCode(rune);
-          continue;
-        }
-        if (runeIndex == startIndex || isWordSplit) {
-          // Adds the line terminator
-          if (isWordSplit) {
-            buffer
-              ..write(qpWordTail)
-              // NOTE Per specification, a CRLF should be inserted here,
-              // but the folding occurs on the rendering function.
-              // Here we leave only the WSP marker to separate each q-encode
-              // word.
-              // ..writeCharCode(AsciiRunes.runeCarriageReturn)
-              // ..writeCharCode(AsciiRunes.runeLineFeed)
-              // Assumes per default a single leading space for header folding
-              ..writeCharCode(AsciiRunes.runeSpace);
-            // Resets the split flag
-            isWordSplit = false;
-            // Calculates the new encoded word size
-            qpWordSize =
-                MailConventions.encodedWordMaxLength - qpWordDelimiterSize - 1;
-          }
-          buffer.write(qpWordHead);
-        }
-        if ((rune > AsciiRunes.runeSpace && rune <= 60) ||
-            (rune == 62) ||
-            (rune > 63 && rune <= 126 && rune != AsciiRunes.runeUnderline)) {
-          wordCounter++;
-          isWordSplit = wordCounter > qpWordSize;
-          if (!isWordSplit) {
-            buffer.writeCharCode(rune);
-          }
-        } else if (rune == AsciiRunes.runeSpace) {
-          wordCounter++;
-          isWordSplit = wordCounter > qpWordSize;
-          if (!isWordSplit) {
-            buffer.write('_');
-          }
-        } else {
-          // _writeQuotedPrintable(rune, buffer, codec);
-          final quoted = _encodeQuotedPrintableChar(rune, codec);
-          wordCounter += quoted.length;
-          isWordSplit = wordCounter > qpWordSize;
-          if (!isWordSplit) {
-            buffer.write(quoted);
-          }
-        }
+
+      // Start a new encoded word
+      if (runeIndex == startIndex || isWordSplit) {
         if (isWordSplit) {
-          wordCounter = 0;
-          runeIndex--;
+          buffer..write(qpWordTail)..writeCharCode(AsciiRunes.runeSpace);
+          isWordSplit = false;
+          qpWordSize = MailConventions.encodedWordMaxLength - qpWordDelimiterSize - 1;
         }
-        if (runeIndex == endIndex) {
-          buffer.write(qpWordTail);
+        buffer.write(qpWordHead);
+      }
+
+      // Encode ASCII and special characters
+      if (rune > AsciiRunes.runeSpace && rune <= 126) {
+        wordCounter++;
+        isWordSplit = wordCounter > qpWordSize;
+        if (!isWordSplit) {
+          buffer.writeCharCode(rune);
+        }
+      } else {
+        // Encode non-ASCII characters
+        final quoted = _encodeQuotedPrintableChar(rune, codec);
+        wordCounter += quoted.length;
+        isWordSplit = wordCounter > qpWordSize;
+        if (!isWordSplit) {
+          buffer.write(quoted);
         }
       }
-      return buffer.toString();
+
+      if (isWordSplit) {
+        wordCounter = 0;
+        runeIndex--;
+      }
+
+      if (runeIndex == endIndex) {
+        buffer.write(qpWordTail);
+      }
     }
+    return buffer.toString();
   }
+
+  // String encodeHeader(final String text,
+  //     {int nameLength = 0, Codec codec = utf8, bool fromStart = false}) {
+  //   final runes = List.from(text.runes, growable: false);
+  //   var numberOfRunesAbove7Bit = 0;
+  //   var startIndex = -1;
+  //   var endIndex = -1;
+  //   final runeCount = runes.length;
+  //
+  //   for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
+  //     final rune = runes[runeIndex];
+  //     if (rune > 128) {
+  //       numberOfRunesAbove7Bit++;
+  //       if (startIndex == -1) {
+  //         startIndex = runeIndex;
+  //         endIndex = runeIndex;
+  //       } else {
+  //         endIndex = runeIndex;
+  //       }
+  //     }
+  //   }
+  //   if (numberOfRunesAbove7Bit == 0) {
+  //     return text;
+  //   } else {
+  //     // TODO Set the correct encoding
+  //     const qpWordHead = '=?utf8?Q?';
+  //     const qpWordTail = '?=';
+  //     const qpWordDelimiterSize = qpWordHead.length + qpWordTail.length;
+  //     if (fromStart) {
+  //       startIndex = 0;
+  //       endIndex = text.length - 1;
+  //     }
+  //     // Available space for the current encoded word
+  //     var qpWordSize = MailConventions.encodedWordMaxLength -
+  //         qpWordDelimiterSize -
+  //         startIndex -
+  //         (nameLength + 2);
+  //     // Counts the characters of the current encoded word
+  //     var wordCounter = 0;
+  //     // True when reached the end of the current word available space
+  //     var isWordSplit = false;
+  //     final buffer = StringBuffer();
+  //     for (var runeIndex = 0; runeIndex < runeCount; runeIndex++) {
+  //       final rune = runes[runeIndex];
+  //       if (runeIndex < startIndex || runeIndex > endIndex) {
+  //         buffer.writeCharCode(rune);
+  //         continue;
+  //       }
+  //       if (runeIndex == startIndex || isWordSplit) {
+  //         // Adds the line terminator
+  //         if (isWordSplit) {
+  //           buffer
+  //             ..write(qpWordTail)
+  //             // NOTE Per specification, a CRLF should be inserted here,
+  //             // but the folding occurs on the rendering function.
+  //             // Here we leave only the WSP marker to separate each q-encode
+  //             // word.
+  //             // ..writeCharCode(AsciiRunes.runeCarriageReturn)
+  //             // ..writeCharCode(AsciiRunes.runeLineFeed)
+  //             // Assumes per default a single leading space for header folding
+  //             ..writeCharCode(AsciiRunes.runeSpace);
+  //           // Resets the split flag
+  //           isWordSplit = false;
+  //           // Calculates the new encoded word size
+  //           qpWordSize =
+  //               MailConventions.encodedWordMaxLength - qpWordDelimiterSize - 1;
+  //         }
+  //         buffer.write(qpWordHead);
+  //       }
+  //       if ((rune > AsciiRunes.runeSpace && rune <= 60) ||
+  //           (rune == 62) ||
+  //           (rune > 63 && rune <= 126 && rune != AsciiRunes.runeUnderline)) {
+  //         wordCounter++;
+  //         isWordSplit = wordCounter > qpWordSize;
+  //         if (!isWordSplit) {
+  //           buffer.writeCharCode(rune);
+  //         }
+  //       } else if (rune == AsciiRunes.runeSpace) {
+  //         wordCounter++;
+  //         isWordSplit = wordCounter > qpWordSize;
+  //         if (!isWordSplit) {
+  //           buffer.write('_');
+  //         }
+  //       } else {
+  //         // _writeQuotedPrintable(rune, buffer, codec);
+  //         final quoted = _encodeQuotedPrintableChar(rune, codec);
+  //         wordCounter += quoted.length;
+  //         isWordSplit = wordCounter > qpWordSize;
+  //         if (!isWordSplit) {
+  //           buffer.write(quoted);
+  //         }
+  //       }
+  //       if (isWordSplit) {
+  //         wordCounter = 0;
+  //         runeIndex--;
+  //       }
+  //       if (runeIndex == endIndex) {
+  //         buffer.write(qpWordTail);
+  //       }
+  //     }
+  //     return buffer.toString();
+  //   }
+  // }
 
   /// Decodes the specified text
   ///
